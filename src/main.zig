@@ -31,6 +31,14 @@ fn handle_client(connection: std.net.Server.Connection) !void {
 }
 
 pub fn main() !void {
+    const act: std.posix.Sigaction = .{
+        // Set handler to a noop function instead of `SIG.IGN` to prevent
+        // leaking signal disposition to a child process.
+        .handler = .{ .handler = null },
+        .mask = std.posix.empty_sigset,
+        .flags = std.posix.SA.NOCLDWAIT,
+    };
+    try std.posix.sigaction(std.posix.SIG.CHLD, &act, null);
     const addr = std.net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 12345);
     var server = try std.net.Address.listen(addr, .{
         .reuse_port = true,
