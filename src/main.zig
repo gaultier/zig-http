@@ -41,6 +41,7 @@ const HttpRequest = struct {
 };
 
 fn request_parse_status_line(s: []const u8) !HttpRequest {
+    std.log.info("status line `{s}`", .{s});
     const space = [_]u8{ ' ', '\r' };
 
     var it = std.mem.splitScalar(u8, s, ' ');
@@ -48,7 +49,6 @@ fn request_parse_status_line(s: []const u8) !HttpRequest {
     var req: HttpRequest = undefined;
     if (it.next()) |method| {
         const method_trimmed = std.mem.trim(u8, method, space[0..]);
-        std.log.info("method={s} method_trimmed=`{s}`", .{ method, method_trimmed });
 
         if (std.mem.eql(u8, method_trimmed, "GET")) {
             req.method = .Get;
@@ -96,6 +96,7 @@ const LineBufferedReader = struct {
             } else {
                 var buf = [_]u8{0} ** 4096;
                 const n_read = try self.read_fn(self.context, buf[0..]);
+                // FIXME: this may move!
                 try self.buf.appendSlice(buf[0..n_read]);
             }
         }
@@ -108,9 +109,10 @@ const LineBufferedReader = struct {
         }
 
         const needle = "\r\n";
-        const newline_idx = std.mem.indexOfPos(u8, self.buf.items, self.idx, needle);
+        const to_search = self.buf.items[self.idx..];
+        const newline_idx = std.mem.indexOf(u8, to_search, needle);
         if (newline_idx) |idx| {
-            const res = self.buf.items[self.idx..][0..idx];
+            const res = to_search[0..idx];
             self.idx += idx + needle.len;
             return res;
         } else {
@@ -140,7 +142,7 @@ fn request_read_headers(reader: *LineBufferedReader, allocator: std.mem.Allocato
     for (0..MAX_HTTP_HEADERS_ALLOWED) |_| {
         const line_opt = try reader.read_line();
         if (line_opt) |line| {
-            if (line.len == 1 and line[0] == '\r') {
+            if (std.mem.eql(u8, line, "\r\n")) {
                 break; // The end.
             }
 
@@ -154,8 +156,10 @@ fn request_read_headers(reader: *LineBufferedReader, allocator: std.mem.Allocato
                     .key = std.mem.trim(u8, line[0..colon_idx], space[0..]),
                     .value = std.mem.trim(u8, line[colon_idx + 1 ..], space[0..]),
                 };
+                std.log.info("new header {any}", .{header});
                 try headers.append(header);
             } else {
+                std.log.err("invalid http header `{s}` {any}", .{ line, reader });
                 return error.InvalidHttpHeader;
             }
         } else {
@@ -210,7 +214,7 @@ pub fn main() !void {
         .mask = std.posix.empty_sigset,
         .flags = std.posix.SA.NOCLDWAIT,
     };
-    try std.posix.sigaction(std.posix.SIG.CHLD, &act, null);
+    std.posix.sigaction(std.posix.SIG.CHLD, &act, null);
     const addr = std.net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 12345);
     var server = try std.net.Address.listen(addr, .{
         .reuse_port = true,
