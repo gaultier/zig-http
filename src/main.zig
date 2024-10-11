@@ -119,6 +119,8 @@ fn request_read(reader: std.net.Stream.Reader, allocator: std.mem.Allocator) !Ht
     var req = try request_parse_status_line(status_line);
     req.headers = try request_read_headers(reader, &read_buf, allocator);
 
+    std.log.info("req {any}", .{req});
+
     return req;
 }
 
