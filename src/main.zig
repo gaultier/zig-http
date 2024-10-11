@@ -79,45 +79,104 @@ fn request_parse_status_line(s: []const u8) !HttpRequest {
     return req;
 }
 
-fn request_read_headers(reader: std.net.Stream.Reader, read_buf: []u8, allocator: std.mem.Allocator) ![]const HttpHeader {
+fn LineBufferedReader(
+    comptime Context: type,
+    comptime ReadError: type,
+    comptime read_fn: fn (context: Context, buffer: []u8) ReadError!usize,
+) type {
+    return struct {
+        const Self = @This();
+        pub const Error = ReadError;
+
+        context: Context,
+        buf: std.ArrayList(u8),
+        idx: u64,
+
+        fn read_line(self: *Self) !?[]const u8 {
+            for (0..10) |_| {
+                const line = self.consume_existing_line();
+                if (line) |l| {
+                    return l;
+                } else {
+                    var buf = [_]u8{0} ** 4096;
+                    const n_read = try read_fn(self.context, buf[0..]);
+                    self.buf.appendSlice(buf[0..n_read]);
+                }
+            }
+            return null;
+        }
+
+        fn consume_existing_line(self: *Self) ?[]const u8 {
+            if (self.idx >= self.buf.items.len) {
+                return null;
+            }
+
+            const needle = "\r\n";
+            const newline_idx = std.mem.indexOfPos(self.buf.items, self.idx, needle);
+            if (newline_idx) |idx| {
+                const res = self.buf.items[self.idx..][0..idx];
+                self.idx += idx + needle.len;
+                return res;
+            } else {
+                return null;
+            }
+        }
+    };
+}
+
+pub fn line_buffered_reader_from_stream(stream: std.net.Stream, allocator: std.mem.Allocator) LineBufferedReader(std.net.Stream, std.net.Stream.ReadError, std.net.Stream.read) {
+    return .{ .context = stream, .buf = std.ArrayList(u8).init(allocator), .idx = 0 };
+}
+
+fn request_read_headers(reader: *LineBufferedReader, allocator: std.mem.Allocator) ![]const HttpHeader {
     var headers = std.ArrayList(HttpHeader).init(allocator);
     const space = [_]u8{ ' ', '\r' };
 
     for (0..MAX_HTTP_HEADERS_ALLOWED) |_| {
-        const line = try std.net.Stream.Reader.readUntilDelimiter(reader, read_buf[0..], '\n');
-        if (line.len == 1 and line[0] == '\r') {
-            break; // The end.
-        }
+        const line_opt = try reader.read_line();
+        if (line_opt) |line| {
+            if (line.len == 1 and line[0] == '\r') {
+                break; // The end.
+            }
 
-        var it = std.mem.splitScalar(u8, line, ':');
+            var it = std.mem.splitScalar(u8, line, ':');
 
-        var header: HttpHeader = undefined;
-        if (it.next()) |key| {
-            header.key = std.mem.trim(u8, key, space[0..]);
+            var header: HttpHeader = undefined;
+            if (it.next()) |key| {
+                header.key = std.mem.trim(u8, key, space[0..]);
+            } else {
+                return error.InvalidHttpHeaderKey;
+            }
+            if (it.next()) |value| {
+                header.value = std.mem.trim(u8, value, space[0..]);
+            } else {
+                return error.InvalidHttpHeaderValue;
+            }
+
+            if (it.next()) |x| {
+                std.log.err("trailing `{s}`", .{x});
+                return error.InvalidHttpHeaderTrailingColon;
+            }
+
+            try headers.append(header);
         } else {
-            return error.InvalidHttpHeader;
+            break;
         }
-        if (it.next()) |value| {
-            header.value = std.mem.trim(u8, value, space[0..]);
-        } else {
-            return error.InvalidHttpHeader;
-        }
-
-        if (it.next()) |_| {
-            return error.InvalidHttpHeader;
-        }
-
-        try headers.append(header);
     }
 
     return headers.toOwnedSlice();
 }
 
-fn request_read(reader: std.net.Stream.Reader, allocator: std.mem.Allocator) !HttpRequest {
-    var read_buf = [_]u8{0} ** 4096;
-    const status_line = try reader.readUntilDelimiter(&read_buf, '\n');
-    var req = try request_parse_status_line(status_line);
-    req.headers = try request_read_headers(reader, &read_buf, allocator);
+fn request_read(reader: *LineBufferedReader, allocator: std.mem.Allocator) !HttpRequest {
+    const status_line = try reader.read_line();
+
+    var req: HttpRequest = undefined;
+    if (status_line) |line| {
+        req = try request_parse_status_line(line);
+    } else {
+        return error.MissingStatusLine;
+    }
+    req.headers = try request_read_headers(reader, allocator);
 
     std.log.info("req {any}", .{req});
 
@@ -134,8 +193,8 @@ fn handle_client(connection: std.net.Server.Connection) !void {
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = fba.allocator();
 
-    const reader = connection.stream.reader();
-    const req = try request_read(reader, allocator);
+    const reader = line_buffered_reader_from_stream(connection.stream, allocator);
+    const req = try request_read(&reader, allocator);
     std.log.info("req {any}", .{req});
 
     const writer = connection.stream.writer();
