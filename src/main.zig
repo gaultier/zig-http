@@ -79,53 +79,57 @@ fn request_parse_status_line(s: []const u8) !HttpRequest {
     return req;
 }
 
-fn LineBufferedReader(
-    comptime Context: type,
-    comptime ReadError: type,
-    comptime read_fn: fn (context: Context, buffer: []u8) ReadError!usize,
-) type {
-    return struct {
-        const Self = @This();
-        pub const Error = ReadError;
+const LineBufferedReader = struct {
+    context: *const anyopaque,
+    read_fn: *const fn (context: *const anyopaque, buffer: []u8) anyerror!usize,
+    buf: std.ArrayList(u8),
+    idx: u64,
 
-        context: Context,
-        buf: std.ArrayList(u8),
-        idx: u64,
+    const Self = @This();
 
-        fn read_line(self: *Self) !?[]const u8 {
-            for (0..10) |_| {
-                const line = self.consume_existing_line();
-                if (line) |l| {
-                    return l;
-                } else {
-                    var buf = [_]u8{0} ** 4096;
-                    const n_read = try read_fn(self.context, buf[0..]);
-                    self.buf.appendSlice(buf[0..n_read]);
-                }
+    fn read_line(self: *Self) !?[]const u8 {
+        for (0..10) |_| {
+            const line = self.consume_existing_line();
+            if (line) |l| {
+                return l;
+            } else {
+                var buf = [_]u8{0} ** 4096;
+                const n_read = try self.read_fn(self.context, buf[0..]);
+                try self.buf.appendSlice(buf[0..n_read]);
             }
+        }
+        return null;
+    }
+
+    fn consume_existing_line(self: *Self) ?[]const u8 {
+        if (self.idx >= self.buf.items.len) {
             return null;
         }
 
-        fn consume_existing_line(self: *Self) ?[]const u8 {
-            if (self.idx >= self.buf.items.len) {
-                return null;
-            }
-
-            const needle = "\r\n";
-            const newline_idx = std.mem.indexOfPos(self.buf.items, self.idx, needle);
-            if (newline_idx) |idx| {
-                const res = self.buf.items[self.idx..][0..idx];
-                self.idx += idx + needle.len;
-                return res;
-            } else {
-                return null;
-            }
+        const needle = "\r\n";
+        const newline_idx = std.mem.indexOfPos(u8, self.buf.items, self.idx, needle);
+        if (newline_idx) |idx| {
+            const res = self.buf.items[self.idx..][0..idx];
+            self.idx += idx + needle.len;
+            return res;
+        } else {
+            return null;
         }
+    }
+};
+
+pub fn line_buffered_reader_from_stream(stream: *std.net.Stream, allocator: std.mem.Allocator) LineBufferedReader {
+    return .{
+        .context = stream,
+        .buf = std.ArrayList(u8).init(allocator),
+        .idx = 0,
+        .read_fn = line_buffered_reader_read_from_stream,
     };
 }
 
-pub fn line_buffered_reader_from_stream(stream: std.net.Stream, allocator: std.mem.Allocator) LineBufferedReader(std.net.Stream, std.net.Stream.ReadError, std.net.Stream.read) {
-    return .{ .context = stream, .buf = std.ArrayList(u8).init(allocator), .idx = 0 };
+fn line_buffered_reader_read_from_stream(context: *const anyopaque, buffer: []u8) std.net.Stream.ReadError!usize {
+    const stream: *std.net.Stream = @constCast(@alignCast(@ptrCast(context)));
+    return stream.read(buffer);
 }
 
 fn request_read_headers(reader: *LineBufferedReader, allocator: std.mem.Allocator) ![]const HttpHeader {
@@ -188,12 +192,12 @@ fn request_reply(writer: std.net.Stream.Writer) !void {
     try writer.writeAll(res[0..]);
 }
 
-fn handle_client(connection: std.net.Server.Connection) !void {
+fn handle_client(connection: *std.net.Server.Connection) !void {
     var buffer: [4096]u8 = undefined; // FIXME: Use mmap?
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = fba.allocator();
 
-    const reader = line_buffered_reader_from_stream(connection.stream, allocator);
+    var reader = line_buffered_reader_from_stream(&connection.stream, allocator);
     const req = try request_read(&reader, allocator);
     std.log.info("req {any}", .{req});
 
@@ -220,7 +224,7 @@ pub fn main() !void {
     });
 
     while (true) {
-        const connection = try std.net.Server.accept(&server);
+        var connection = try std.net.Server.accept(&server);
         std.log.info("new client {}", .{connection.address});
 
         const pid = try std.posix.fork();
@@ -228,7 +232,7 @@ pub fn main() !void {
             connection.stream.close();
             continue;
         } else { // Child.
-            try handle_client(connection);
+            try handle_client(&connection);
         }
     }
 }
