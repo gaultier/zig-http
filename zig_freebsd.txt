@@ -1,0 +1,6 @@
+include_dir=/home/pg/scratch/freebsd-sysroot/usr/include/
+sys_include_dir=/home/pg/scratch/freebsd-sysroot/usr/include/
+crt_dir=/home/pg/scratch/freebsd-sysroot/usr/lib/
+msvc_lib_dir=
+kernel32_lib_dir=
+gcc_dir=

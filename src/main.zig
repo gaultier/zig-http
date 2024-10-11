@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const MAX_HTTP_HEADERS_ALLOWED = 256;
+
 pub const std_options = .{
     // Set the log level to info
     .log_level = .info,
@@ -24,15 +26,21 @@ pub fn myLogFn(
     nosuspend stderr.print(prefix ++ format ++ "\n", args) catch return;
 }
 
+const HttpHeader = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
 const HttpRequest = struct {
     method: enum {
         Get,
         Post,
     },
     path: []const u8,
+    headers: []const HttpHeader,
 };
 
-fn request_parse_status_line(s: []u8) !HttpRequest {
+fn request_parse_status_line(s: []const u8) !HttpRequest {
     const space = [_]u8{ ' ', '\r' };
 
     var it = std.mem.splitScalar(u8, s, ' ');
@@ -71,18 +79,45 @@ fn request_parse_status_line(s: []u8) !HttpRequest {
     return req;
 }
 
-fn request_read(reader: std.net.Stream.Reader) !HttpRequest {
-    var read_buf = [_]u8{0} ** 4096;
-    const status_line = try std.net.Stream.Reader.readUntilDelimiter(reader, &read_buf, '\n');
-    const req = try request_parse_status_line(status_line);
+fn request_read_headers(reader: std.net.Stream.Reader, read_buf: []u8, allocator: std.mem.Allocator) ![]const HttpHeader {
+    var headers = std.ArrayList(HttpHeader).init(allocator);
+    const space = [_]u8{ ' ', '\r' };
 
-    for (0..10) |_| {
+    for (0..MAX_HTTP_HEADERS_ALLOWED) |_| {
         const line = try std.net.Stream.Reader.readUntilDelimiter(reader, &read_buf, '\n');
         if (line.len == 1 and line[0] == '\r') {
-            break;
+            break; // The end.
         }
-        std.log.info("line {s}", .{line});
+
+        var it = std.mem.splitScalar(u8, line, ':');
+
+        var header: HttpHeader = undefined;
+        if (it.next()) |key| {
+            header.key = std.mem.trim(u8, key, space);
+        } else {
+            return error.InvalidHttpHeader;
+        }
+        if (it.next()) |value| {
+            header.value = std.mem.trim(u8, value, space);
+        } else {
+            return error.InvalidHttpHeader;
+        }
+
+        if (it.next()) |_| {
+            return error.InvalidHttpHeader;
+        }
+
+        try headers.append(header);
     }
+
+    return headers.toOwnedSlice();
+}
+
+fn request_read(reader: std.net.Stream.Reader, allocator: std.mem.Allocator) !HttpRequest {
+    var read_buf = [_]u8{0} ** 4096;
+    const status_line = try reader.readUntilDelimiter(&read_buf, '\n');
+    const req = try request_parse_status_line(status_line);
+    req.headers = try request_read_headers(reader, &read_buf, allocator);
 
     return req;
 }
@@ -93,8 +128,12 @@ fn request_reply(writer: std.net.Stream.Writer) !void {
 }
 
 fn handle_client(connection: std.net.Server.Connection) !void {
+    var buffer: [4096]u8 = undefined; // FIXME: Use mmap?
+    var fba = std.heap.FixedBufferAllocator.init(&buffer);
+    const allocator = fba.allocator();
+
     const reader = connection.stream.reader();
-    const req = try request_read(reader);
+    const req = try request_read(reader, allocator);
     std.log.info("req {any}", .{req});
 
     const writer = connection.stream.writer();
