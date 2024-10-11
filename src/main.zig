@@ -55,10 +55,11 @@ fn request_parse_status_line(s: []const u8) !HttpRequest {
         } else if (std.mem.eql(u8, method_trimmed, "POST")) {
             req.method = .Post;
         } else {
+            std.log.err("invalid http method `{s}` `{s}`", .{ s, method });
             return error.InvalidHttpMethod;
         }
     } else {
-        return error.InvalidHttpMethod;
+        return error.MissingHttpMethod;
     }
 
     if (it.next()) |path| {
@@ -143,26 +144,20 @@ fn request_read_headers(reader: *LineBufferedReader, allocator: std.mem.Allocato
                 break; // The end.
             }
 
-            var it = std.mem.splitScalar(u8, line, ':');
+            const colon_idx_opt = std.mem.indexOfScalar(u8, line, ':');
 
-            var header: HttpHeader = undefined;
-            if (it.next()) |key| {
-                header.key = std.mem.trim(u8, key, space[0..]);
+            if (colon_idx_opt) |colon_idx| {
+                if (colon_idx >= line.len - 1) {
+                    return error.MissingHttpHeaderValue;
+                }
+                const header = HttpHeader{
+                    .key = std.mem.trim(u8, line[0..colon_idx], space[0..]),
+                    .value = std.mem.trim(u8, line[colon_idx + 1 ..], space[0..]),
+                };
+                try headers.append(header);
             } else {
-                return error.InvalidHttpHeaderKey;
+                return error.InvalidHttpHeader;
             }
-            if (it.next()) |value| {
-                header.value = std.mem.trim(u8, value, space[0..]);
-            } else {
-                return error.InvalidHttpHeaderValue;
-            }
-
-            if (it.next()) |x| {
-                std.log.err("trailing `{s}`", .{x});
-                return error.InvalidHttpHeaderTrailingColon;
-            }
-
-            try headers.append(header);
         } else {
             break;
         }
