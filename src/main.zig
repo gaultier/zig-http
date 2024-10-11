@@ -24,10 +24,32 @@ pub fn myLogFn(
     nosuspend stderr.print(prefix ++ format ++ "\n", args) catch return;
 }
 
-fn handle_client(connection: std.net.Server.Connection) !void {
+fn request_read(reader: std.net.Stream.Reader) !void {
     var read_buf = [_]u8{0} ** 4096;
-    const n_read = try connection.stream.read(&read_buf);
-    try connection.stream.writeAll(read_buf[0..n_read]);
+    const status_line = try std.net.Stream.Reader.readUntilDelimiter(reader, &read_buf, '\n');
+    std.log.debug("status line {}", .{status_line});
+
+    for (0..10) |_| {
+        const line = try std.net.Stream.Reader.readUntilDelimiter(reader, &read_buf, '\n');
+        if (line.len == 1 and line[0] == '\r') {
+            break;
+        }
+    }
+}
+
+fn request_reply(writer: std.net.Stream.Writer) !void {
+    const res = "HTTP/1.1 200\r\n\r\n";
+    try writer.writeAll(res[0..]);
+}
+
+fn handle_client(connection: std.net.Server.Connection) !void {
+    const reader = connection.stream.reader();
+    try request_read(reader);
+
+    const writer = connection.stream.writer();
+    try request_reply(writer);
+
+    std.posix.exit(0);
 }
 
 pub fn main() !void {
@@ -52,10 +74,10 @@ pub fn main() !void {
 
         const pid = try std.posix.fork();
         if (pid > 0) { // Parent
+            connection.stream.close();
             continue;
         } else { // Child.
             try handle_client(connection);
-            return;
         }
     }
 }
