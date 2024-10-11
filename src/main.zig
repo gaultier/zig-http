@@ -84,7 +84,7 @@ fn request_read_headers(reader: std.net.Stream.Reader, read_buf: []u8, allocator
     const space = [_]u8{ ' ', '\r' };
 
     for (0..MAX_HTTP_HEADERS_ALLOWED) |_| {
-        const line = try std.net.Stream.Reader.readUntilDelimiter(reader, &read_buf, '\n');
+        const line = try std.net.Stream.Reader.readUntilDelimiter(reader, read_buf[0..], '\n');
         if (line.len == 1 and line[0] == '\r') {
             break; // The end.
         }
@@ -93,12 +93,12 @@ fn request_read_headers(reader: std.net.Stream.Reader, read_buf: []u8, allocator
 
         var header: HttpHeader = undefined;
         if (it.next()) |key| {
-            header.key = std.mem.trim(u8, key, space);
+            header.key = std.mem.trim(u8, key, space[0..]);
         } else {
             return error.InvalidHttpHeader;
         }
         if (it.next()) |value| {
-            header.value = std.mem.trim(u8, value, space);
+            header.value = std.mem.trim(u8, value, space[0..]);
         } else {
             return error.InvalidHttpHeader;
         }
@@ -116,7 +116,7 @@ fn request_read_headers(reader: std.net.Stream.Reader, read_buf: []u8, allocator
 fn request_read(reader: std.net.Stream.Reader, allocator: std.mem.Allocator) !HttpRequest {
     var read_buf = [_]u8{0} ** 4096;
     const status_line = try reader.readUntilDelimiter(&read_buf, '\n');
-    const req = try request_parse_status_line(status_line);
+    var req = try request_parse_status_line(status_line);
     req.headers = try request_read_headers(reader, &read_buf, allocator);
 
     return req;
