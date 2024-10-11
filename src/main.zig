@@ -24,17 +24,67 @@ pub fn myLogFn(
     nosuspend stderr.print(prefix ++ format ++ "\n", args) catch return;
 }
 
-fn request_read(reader: std.net.Stream.Reader) !void {
+const HttpRequest = struct {
+    method: enum {
+        Get,
+        Post,
+    },
+    path: []const u8,
+};
+
+fn request_parse_status_line(s: []u8) !HttpRequest {
+    const space = [_]u8{ ' ', '\r' };
+
+    var it = std.mem.splitScalar(u8, s, ' ');
+
+    var req: HttpRequest = undefined;
+    if (it.next()) |method| {
+        const method_trimmed = std.mem.trim(u8, method, space[0..]);
+        std.log.info("method={s} method_trimmed=`{s}`", .{ method, method_trimmed });
+
+        if (std.mem.eql(u8, method_trimmed, "GET")) {
+            req.method = .Get;
+        } else if (std.mem.eql(u8, method_trimmed, "POST")) {
+            req.method = .Post;
+        } else {
+            return error.InvalidHttpMethod;
+        }
+    } else {
+        return error.InvalidHttpMethod;
+    }
+
+    if (it.next()) |path| {
+        const path_trimmed = std.mem.trim(u8, path, space[0..]);
+        req.path = path_trimmed;
+    } else {
+        return error.InvalidUri;
+    }
+
+    if (it.next()) |http_version| {
+        const http_version_trimmed = std.mem.trim(u8, http_version, space[0..]);
+        std.log.info("http_version=`{s}`", .{http_version_trimmed});
+        if (!std.mem.eql(u8, http_version_trimmed, "HTTP/1.1")) {
+            return error.InvalidHttpVersion;
+        }
+    }
+
+    return req;
+}
+
+fn request_read(reader: std.net.Stream.Reader) !HttpRequest {
     var read_buf = [_]u8{0} ** 4096;
     const status_line = try std.net.Stream.Reader.readUntilDelimiter(reader, &read_buf, '\n');
-    std.log.debug("status line {}", .{status_line});
+    const req = try request_parse_status_line(status_line);
 
     for (0..10) |_| {
         const line = try std.net.Stream.Reader.readUntilDelimiter(reader, &read_buf, '\n');
         if (line.len == 1 and line[0] == '\r') {
             break;
         }
+        std.log.info("line {s}", .{line});
     }
+
+    return req;
 }
 
 fn request_reply(writer: std.net.Stream.Writer) !void {
@@ -44,7 +94,8 @@ fn request_reply(writer: std.net.Stream.Writer) !void {
 
 fn handle_client(connection: std.net.Server.Connection) !void {
     const reader = connection.stream.reader();
-    try request_read(reader);
+    const req = try request_read(reader);
+    std.log.info("req {any}", .{req});
 
     const writer = connection.stream.writer();
     try request_reply(writer);
